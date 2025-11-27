@@ -1170,6 +1170,35 @@
             box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
         }
 
+        /* Smart Shuffle Button */
+        .smart-shuffle-btn {
+            background: none;
+            border: none;
+            color: #a0a0b0;
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+        }
+
+        .smart-shuffle-btn:hover {
+            color: white;
+            transform: scale(1.1);
+        }
+
+        .smart-shuffle-btn.active {
+            color: #10b981;
+            text-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+        }
+
+        .smart-shuffle-btn.active::after {
+            content: '✨';
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            font-size: 0.8rem;
+        }
+
         /* Lyrics Container */
         .lyrics-container {
             position: absolute;
@@ -1637,6 +1666,7 @@
             </div>
             
             <div class="player-controls">
+                <button class="control-button smart-shuffle-btn" onclick="toggleSmartShuffle()" id="smartShuffleBtn" title="Smart Shuffle">⚡</button>
                 <button class="control-button">🔀</button>
                 <button class="control-button" onclick="playPreviousSong()">⏮</button>
                 <button class="control-button play-pause-btn" onclick="togglePlayPause()" id="playPauseBtn">▶</button>
@@ -1686,6 +1716,9 @@
         let currentLyrics = null;
         let isLyricsVisible = false;
         
+        // Smart Shuffle state
+        let isSmartShuffleActive = false;
+
         // Genre data management
         let genreData = null;
         let selectedGenres = [];
@@ -3008,10 +3041,26 @@
             playLocalSong(localSongs[newIndex].uri);
         }
 
-        function playNextSong() {
+        async function playNextSong() {
             if (localSongs.length === 0) return;
+
+            // If Smart Shuffle is active, try to fetch new songs first
+            if (isSmartShuffleActive) {
+                // Wait for songs to load if possible
+                if (!Android) {
+                    try {
+                        await loadServerSongs();
+                    } catch (e) {
+                        console.error('Failed to refresh server songs:', e);
+                    }
+                }
+                loadLocalSongs();
+            }
+
             let newIndex = currentSongIndex + 1;
-            if (newIndex >= localSongs.length) newIndex = 0;
+            if (newIndex >= localSongs.length) {
+                newIndex = 0;
+            }
             playLocalSong(localSongs[newIndex].uri);
         }
 
@@ -3146,6 +3195,77 @@
                 lyricsError.classList.add('active');
                 showNotification('Lyrics service unavailable', 'error');
             }
+        }
+
+        // Smart Shuffle Functionality
+        async function toggleSmartShuffle() {
+            const btn = document.getElementById('smartShuffleBtn');
+            const currentTitle = document.getElementById('currentSongTitle').textContent;
+            const currentArtist = document.getElementById('currentSongArtist').textContent;
+
+            if (currentTitle === 'No song selected') {
+                showNotification('Play a song first to start Smart Shuffle', 'error');
+                return;
+            }
+
+            if (!isSmartShuffleActive) {
+                // Activate Smart Shuffle
+                btn.classList.add('active');
+                isSmartShuffleActive = true;
+                showNotification('⚡ Starting Smart Shuffle...', 'info');
+
+                try {
+                    const response = await fetch('/api/smart-shuffle/start', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            song_name: currentTitle,
+                            artist: currentArtist
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        showNotification(`Smart Shuffle active: ${data.vibe}`, 'success');
+                        // Start polling/refreshing songs to catch new downloads
+                        startSmartShufflePolling();
+                    } else {
+                        showNotification('Failed to start Smart Shuffle', 'error');
+                        btn.classList.remove('active');
+                        isSmartShuffleActive = false;
+                    }
+                } catch (error) {
+                    console.error('Smart Shuffle error:', error);
+                    showNotification('Error starting Smart Shuffle', 'error');
+                    btn.classList.remove('active');
+                    isSmartShuffleActive = false;
+                }
+            } else {
+                // Deactivate Smart Shuffle
+                btn.classList.remove('active');
+                isSmartShuffleActive = false;
+                showNotification('Smart Shuffle disabled', 'info');
+                stopSmartShufflePolling();
+            }
+        }
+
+        let smartShufflePollInterval;
+
+        function startSmartShufflePolling() {
+            // Poll for new songs every 10 seconds while Smart Shuffle is active
+            if (smartShufflePollInterval) clearInterval(smartShufflePollInterval);
+            smartShufflePollInterval = setInterval(() => {
+                if (isSmartShuffleActive) {
+                    loadLocalSongs();
+                } else {
+                    clearInterval(smartShufflePollInterval);
+                }
+            }, 10000);
+        }
+
+        function stopSmartShufflePolling() {
+            if (smartShufflePollInterval) clearInterval(smartShufflePollInterval);
         }
 
         function showNotification(message, type) {
