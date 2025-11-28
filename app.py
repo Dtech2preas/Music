@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 import json
 import os
 import yt_dlp
@@ -989,6 +989,68 @@ def get_song_filename(song_name, artist):
     safe_name = "".join(c for c in f"{song_name} - {artist}" if c.isalnum() or c in (' ', '-', '_')).rstrip()
     return f"{safe_name}.opus"
 
+def get_video_url_for_streaming(song_name, artist):
+    """Get a working YouTube Web URL for a song by checking multiple results"""
+    search_query = f"{song_name} {artist}"
+
+    # 1. Fast Search (Metadata only)
+    search_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'forcejson': True,
+        'cookiefile': app.config['COOKIES_FILE'] if os.path.exists(app.config['COOKIES_FILE']) else None,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+
+    # 2. Verification Options (Deep check)
+    verify_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False, # Actually check availability
+        'forcejson': True,
+        'cookiefile': app.config['COOKIES_FILE'] if os.path.exists(app.config['COOKIES_FILE']) else None,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+
+    if not os.path.exists(app.config['COOKIES_FILE']):
+        search_opts.pop('cookiefile', None)
+        verify_opts.pop('cookiefile', None)
+
+    try:
+        # Step 1: Get Candidates
+        with yt_dlp.YoutubeDL(search_opts) as ydl:
+            search_results = ydl.extract_info(f"ytsearch5:{search_query}", download=False)
+
+        if not search_results or 'entries' not in search_results:
+            return None
+
+        # Step 2: Verify Availability
+        with yt_dlp.YoutubeDL(verify_opts) as ydl:
+            for entry in search_results['entries']:
+                if not entry: continue
+
+                video_url = entry.get('url')
+                title = entry.get('title', 'Unknown')
+
+                if not video_url: continue
+
+                try:
+                    # Check if actually playable
+                    logger.info(f"Verifying candidate: {title} ({video_url})")
+                    ydl.extract_info(video_url, download=False)
+                    # If no exception, it's valid
+                    return video_url
+                except Exception as e:
+                    logger.warning(f"Candidate blocked/unavailable: {title} - {str(e)}")
+                    continue
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Video search failed: {str(e)}")
+        return None
+
 def find_song_file(song_name, artist):
     if download_manager:
         expected_filename = get_song_filename(song_name, artist)
@@ -1295,11 +1357,11 @@ def start_smart_shuffle():
                 # Add songs to library
                 add_genre_songs_to_library(genre_data)
 
-                # Auto-download songs
-                if download_manager:
-                    downloads_triggered = auto_download_genre_songs(genre_data, user_id)
-                    system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
-                    logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
+                # Auto-download songs - DISABLED for Smart Shuffle (Streaming First)
+                # if download_manager:
+                #     downloads_triggered = auto_download_genre_songs(genre_data, user_id)
+                #     system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
+                #     logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
             else:
                 logger.error(f"Smart Shuffle exploration failed: {result.get('error')}")
 
@@ -1313,6 +1375,94 @@ def start_smart_shuffle():
         'message': f'Smart Shuffle started for {artist}',
         'vibe': f"{artist} Mix"
     })
+
+# NEW: Streaming Endpoint
+@app.route('/stream')
+def stream_audio():
+    """Stream audio directly from YouTube via server proxy (piping yt-dlp stdout)"""
+    song_name = request.args.get('song')
+    artist = request.args.get('artist')
+
+    if not song_name:
+        return jsonify({'error': 'Song name is required'}), 400
+
+    try:
+        # 1. Find the video URL (Web URL)
+        video_url = get_video_url_for_streaming(song_name, artist or "")
+
+        if not video_url:
+            return jsonify({'error': 'Could not find video'}), 404
+
+        # 2. Pipe yt-dlp output to client
+        # This handles HLS/DASH/Formats automatically and outputs linear bytes
+
+        # Transcode Pipeline: yt-dlp -> ffmpeg -> mp3 -> client
+        # This ensures maximum compatibility and fixes "Requested format not available" issues
+
+        # 1. yt-dlp command (Get raw audio)
+        yt_cmd = [
+            'yt-dlp',
+            '-f', 'bestaudio',
+            '-o', '-',
+            '--quiet',
+            '--no-warnings',
+            video_url
+        ]
+
+        if os.path.exists(app.config['COOKIES_FILE']):
+            yt_cmd.extend(['--cookies', app.config['COOKIES_FILE']])
+
+        # 2. ffmpeg command (Convert to standard MP3 stream)
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-i', 'pipe:0',      # Input from pipe (yt-dlp)
+            '-f', 'mp3',         # Output format MP3
+            '-ab', '128k',       # Audio bitrate
+            '-vn',               # No video
+            '-nostats',          # Reduce log noise
+            '-loglevel', 'error',
+            'pipe:1'             # Output to stdout
+        ]
+
+        logger.info(f"Starting Streaming Pipeline: {' '.join(yt_cmd)} | {' '.join(ffmpeg_cmd)}")
+
+        # Start processes
+        p1 = subprocess.Popen(yt_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p2 = subprocess.Popen(ffmpeg_cmd, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # Close p1 stdout in this parent process to allow SIGPIPE usage
+        p1.stdout.close()
+
+        def generate():
+            try:
+                while True:
+                    # Read from ffmpeg output
+                    chunk = p2.stdout.read(1024 * 32)
+                    if not chunk:
+                        break
+                    yield chunk
+
+                # Check for errors
+                if p2.poll() and p2.returncode != 0:
+                    stderr = p2.stderr.read().decode()
+                    logger.error(f"FFmpeg error: {stderr}")
+
+            except Exception as e:
+                logger.error(f"Stream generation error: {str(e)}")
+            finally:
+                # Cleanup
+                try:
+                    if p1.poll() is None: p1.terminate()
+                    if p2.poll() is None: p2.terminate()
+                except:
+                    pass
+
+        return Response(stream_with_context(generate()),
+                      content_type='audio/mpeg')
+
+    except Exception as e:
+        logger.error(f"Streaming error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Progressive search implementation
 @app.route('/search/progressive', methods=['POST'])
