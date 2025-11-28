@@ -320,6 +320,34 @@
             color: #e74c3c !important;
         }
 
+        .smart-shuffle-btn {
+            background: none;
+            border: none;
+            color: #a0a0b0;
+            font-size: 1.2rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+        }
+
+        .smart-shuffle-btn:hover {
+            color: white;
+            transform: scale(1.1);
+        }
+
+        .smart-shuffle-btn.active {
+            color: #10b981;
+            text-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+        }
+
+        .smart-shuffle-btn.active::after {
+            content: '✨';
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            font-size: 0.6rem;
+        }
+
         .menu-btn {
             position: relative;
         }
@@ -710,6 +738,9 @@
 
             <div class="player-controls">
                 <div class="control-buttons">
+                    <button id="smartShuffleBtn" class="smart-shuffle-btn" onclick="toggleSmartShuffle()" title="Smart Shuffle">
+                        ⚡
+                    </button>
                     <button id="shuffleBtn">
                         <svg class="icon" viewBox="0 0 24 24">
                             <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/>
@@ -809,6 +840,7 @@
         let contextMenuSongIndex = -1;
         let playQueue = [];
         let isShuffle = false;
+        let isSmartShuffleActive = false;
         let isRepeat = 0; // 0 = off, 1 = repeat all, 2 = repeat one
         let filteredSongs = [];
         let currentView = 'all'; // 'all' or 'favorites'
@@ -1191,7 +1223,7 @@
             }
         }
 
-        function playNextSong() {
+        async function playNextSong() {
             if (localSongs.length === 0) return;
 
             // Check if there's a song in the queue
@@ -1199,6 +1231,21 @@
                 const nextIndex = playQueue.shift();
                 playLibrarySong(nextIndex);
                 return;
+            }
+
+            // If Smart Shuffle is active, try to fetch new songs first
+            if (isSmartShuffleActive) {
+                if (typeof Android === 'undefined') {
+                    // Refresh server songs if on web
+                    try {
+                        await loadServerSongs();
+                        loadLocalSongs();
+                    } catch (e) {
+                        console.log("Could not refresh songs");
+                    }
+                } else {
+                    loadLocalSongs();
+                }
             }
 
             if (isShuffle) {
@@ -1386,6 +1433,76 @@
             const mins = Math.floor(seconds / 60);
             const secs = Math.floor(seconds % 60);
             return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // Smart Shuffle Functionality
+        async function toggleSmartShuffle() {
+            const btn = document.getElementById('smartShuffleBtn');
+            const currentTitle = document.getElementById('currentSongTitle').textContent;
+            const currentArtist = document.getElementById('currentSongArtist').textContent;
+
+            if (currentTitle === 'No song selected') {
+                showNotification('Play a song first to start Smart Shuffle', 'error');
+                return;
+            }
+
+            if (!isSmartShuffleActive) {
+                // Activate Smart Shuffle
+                btn.classList.add('active');
+                isSmartShuffleActive = true;
+                showNotification('⚡ Starting Smart Shuffle...', 'info');
+
+                try {
+                    const response = await fetch('/api/smart-shuffle/start', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            song_name: currentTitle,
+                            artist: currentArtist
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        showNotification(`Smart Shuffle active: ${data.vibe}`, 'success');
+                        startSmartShufflePolling();
+                    } else {
+                        showNotification('Failed to start Smart Shuffle', 'error');
+                        btn.classList.remove('active');
+                        isSmartShuffleActive = false;
+                    }
+                } catch (error) {
+                    console.error('Smart Shuffle error:', error);
+                    showNotification('Error starting Smart Shuffle', 'error');
+                    btn.classList.remove('active');
+                    isSmartShuffleActive = false;
+                }
+            } else {
+                // Deactivate Smart Shuffle
+                btn.classList.remove('active');
+                isSmartShuffleActive = false;
+                showNotification('Smart Shuffle disabled', 'info');
+                stopSmartShufflePolling();
+            }
+        }
+
+        let smartShufflePollInterval;
+
+        function startSmartShufflePolling() {
+            // Poll for new songs every 10 seconds while Smart Shuffle is active
+            if (smartShufflePollInterval) clearInterval(smartShufflePollInterval);
+            smartShufflePollInterval = setInterval(() => {
+                if (isSmartShuffleActive) {
+                    loadLocalSongs();
+                } else {
+                    clearInterval(smartShufflePollInterval);
+                }
+            }, 10000);
+        }
+
+        function stopSmartShufflePolling() {
+            if (smartShufflePollInterval) clearInterval(smartShufflePollInterval);
         }
 
         // Utility functions

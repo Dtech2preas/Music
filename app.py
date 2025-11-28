@@ -1261,6 +1261,59 @@ def clear_lyrics_cache():
             'error': f'Failed to clear cache: {str(e)}'
         }), 500
 
+# NEW: Smart Shuffle endpoint
+@app.route('/api/smart-shuffle/start', methods=['POST'])
+def start_smart_shuffle():
+    """Start Smart Shuffle based on the current song/artist"""
+    data = request.json
+    song_name = data.get('song_name')
+    artist = data.get('artist')
+    user_id = get_user_id()
+
+    if not artist:
+        return jsonify({'error': 'Artist is required for Smart Shuffle'}), 400
+
+    # Use a separate thread to not block the response
+    def smart_shuffle_task():
+        try:
+            # We use the artist name as the 'genre' seed.
+            # This works because the underlying search on Spotify
+            # will return the artist's top tracks and similar artists/albums
+            # when searching for the artist name.
+            logger.info(f"Starting Smart Shuffle for artist: {artist}")
+
+            # Using artist + " Mix" might get better results for a vibe,
+            # or just the artist name for their top tracks.
+            # Let's try appending " Mix" to capture the "vibe" as requested.
+            query = f"{artist} Mix"
+
+            result = explore_genre_api(query)
+
+            if result['success']:
+                genre_data = result['genre_data']
+
+                # Add songs to library
+                add_genre_songs_to_library(genre_data)
+
+                # Auto-download songs
+                if download_manager:
+                    downloads_triggered = auto_download_genre_songs(genre_data, user_id)
+                    system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
+                    logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
+            else:
+                logger.error(f"Smart Shuffle exploration failed: {result.get('error')}")
+
+        except Exception as e:
+            logger.error(f"Smart Shuffle task error: {str(e)}")
+
+    Thread(target=smart_shuffle_task, daemon=True).start()
+
+    return jsonify({
+        'success': True,
+        'message': f'Smart Shuffle started for {artist}',
+        'vibe': f"{artist} Mix"
+    })
+
 # Progressive search implementation
 @app.route('/search/progressive', methods=['POST'])
 def progressive_search():
