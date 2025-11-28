@@ -1522,6 +1522,9 @@
     </div>
 
     <div class="app-container">
+        <!-- Hidden HTML5 Audio Player for Streaming -->
+        <audio id="streamPlayer" style="display:none"></audio>
+
         <div class="system-status-bar">
             <span class="system-status-label">System Integrity:</span>
             <span class="system-status-value" id="systemIntegrityValue">--%</span>
@@ -1711,6 +1714,7 @@
         let displayedSongs = [];
         let serverDownloads = new Set();
         let pendingDeviceDownloads = new Map();
+        let activePlayer = 'android'; // 'android' or 'web'
         
         // Lyrics state management
         let currentLyrics = null;
@@ -2233,13 +2237,52 @@
             if (localSong) {
                 playLocalSong(localSong.uri);
             } else {
-                // Try to download first
-                showNotification('Song not downloaded. Searching...', 'info');
-                document.getElementById('searchInput').value = `${songName} ${artist}`;
-                searchSongs();
+                // Stream the song if not downloaded
+                playStream(songName, artist);
+            }
+        }
+
+        // New: Play Audio Stream
+        function playStream(songName, artist) {
+            activePlayer = 'web';
+            const streamPlayer = document.getElementById('streamPlayer');
+
+            // Construct stream URL
+            const streamUrl = `/stream?song=${encodeURIComponent(songName)}&artist=${encodeURIComponent(artist)}`;
+
+            streamPlayer.src = streamUrl;
+            streamPlayer.play().then(() => {
+                isPlaying = true;
+                updatePlayButton();
+            }).catch(e => {
+                console.error("Stream play error:", e);
+                showNotification("Error playing stream", "error");
+            });
+
+            // Update UI
+            updatePlayerUI(songName, artist);
+            document.getElementById('playerFullscreen').classList.add('active');
+
+            // Reset lyrics state
+            if (isLyricsVisible) toggleLyrics();
+            currentLyrics = null;
+
+            // Fetch cover art
+            updateCoverArt(songName, artist);
+
+            // Reset Android player if active
+            if (typeof Android !== 'undefined' && Android.pauseSong) {
+                Android.pauseSong();
             }
         }
         
+        async function updateCoverArt(songName, artist) {
+            const albumArtElement = document.getElementById('playerAlbumArt');
+            albumArtElement.innerHTML = '🎵';
+            const coverUrl = await getSongCover(`${artist} ${songName}`);
+            albumArtElement.innerHTML = `<img src="${coverUrl}" alt="${escapeHtml(songName)}" onerror="this.parentNode.innerHTML='🎵';">`;
+        }
+
         // Show artist details (NEW FUNCTION)
         async function showArtistDetails(artistName) {
             const overlay = document.getElementById('artistDetailsOverlay');
@@ -2347,12 +2390,11 @@
                 localSong.name === expectedFileName
             );
             
-            if (!localSong) {
-                showNotification('Song not downloaded. Please download first.', 'error');
-                return;
+            if (localSong) {
+                playLocalSong(localSong.uri);
+            } else {
+                playStream(song.song_name, song.artist);
             }
-            
-            playLocalSong(localSong.uri);
             closeArtistDetails();
         }
         
@@ -2970,12 +3012,11 @@
                 localSong.name === expectedFileName
             );
             
-            if (!localSong) {
-                showNotification('Song not downloaded. Please download first.', 'error');
-                return;
+            if (localSong) {
+                playLocalSong(localSong.uri);
+            } else {
+                playStream(song.song_name, song.artist);
             }
-            
-            playLocalSong(localSong.uri);
         }
 
         async function playLocalSong(uri) {
@@ -2985,7 +3026,13 @@
                 return;
             }
             
-            if (Android) {
+            activePlayer = 'android';
+
+            // Pause stream if active
+            const streamPlayer = document.getElementById('streamPlayer');
+            if (!streamPlayer.paused) streamPlayer.pause();
+
+            if (typeof Android !== 'undefined' && Android.playSong) {
                 Android.playSong(song.uri, song.name);
             }
             
@@ -3006,11 +3053,7 @@
             }
             currentLyrics = null;
             
-            // Fetch and update cover art
-            const albumArtElement = document.getElementById('playerAlbumArt');
-            albumArtElement.innerHTML = '🎵'; // Reset
-            const coverUrl = await getSongCover(`${artist} ${title}`);
-            albumArtElement.innerHTML = `<img src="${coverUrl}" alt="${escapeHtml(title)}" onerror="this.parentNode.innerHTML='🎵';">`;
+            updateCoverArt(title, artist);
         }
 
         function closePlayer() {
@@ -3022,14 +3065,26 @@
         }
 
         function togglePlayPause() {
-            if (currentSongIndex < 0) return;
-            
-            if (isPlaying) {
-                if (Android) Android.pauseSong();
-                isPlaying = false;
+            if (activePlayer === 'web') {
+                const streamPlayer = document.getElementById('streamPlayer');
+                if (isPlaying) {
+                    streamPlayer.pause();
+                    isPlaying = false;
+                } else {
+                    streamPlayer.play();
+                    isPlaying = true;
+                }
             } else {
-                if (Android) Android.resumeSong();
-                isPlaying = true;
+                // Android logic
+                if (currentSongIndex < 0) return;
+
+                if (isPlaying) {
+                    if (typeof Android !== 'undefined') Android.pauseSong();
+                    isPlaying = false;
+                } else {
+                    if (typeof Android !== 'undefined') Android.resumeSong();
+                    isPlaying = true;
+                }
             }
             updatePlayButton();
         }
@@ -3047,7 +3102,7 @@
             // If Smart Shuffle is active, try to fetch new songs first
             if (isSmartShuffleActive) {
                 // Wait for songs to load if possible
-                if (!Android) {
+                if (typeof Android === 'undefined') {
                     try {
                         await loadServerSongs();
                     } catch (e) {
@@ -3065,7 +3120,12 @@
         }
 
         function seekTo(position) {
-            if (Android) Android.seekTo(position);
+            if (activePlayer === 'web') {
+                const streamPlayer = document.getElementById('streamPlayer');
+                streamPlayer.currentTime = position / 1000; // Convert ms to seconds
+            } else {
+                if (typeof Android !== 'undefined') Android.seekTo(position);
+            }
             currentPosition = position;
             updateProgressBar();
         }
@@ -3087,17 +3147,30 @@
         }
 
         function updateProgress() {
-            if (currentSongIndex < 0 || !isPlaying) return;
+            // Check if playing based on either mode
+            if (!isPlaying && activePlayer === 'android' && currentSongIndex < 0) return;
             
             try {
-                if (Android) {
-                    currentDuration = Android.getDuration();
-                    currentPosition = Android.getCurrentPosition();
+                if (activePlayer === 'web') {
+                    const streamPlayer = document.getElementById('streamPlayer');
+                    if (streamPlayer.duration) {
+                        currentDuration = streamPlayer.duration * 1000;
+                        currentPosition = streamPlayer.currentTime * 1000;
+
+                        if (streamPlayer.ended) {
+                             playNextSong();
+                        }
+                    }
                 } else {
-                    if (currentPosition < currentDuration) {
-                        currentPosition += 1000;
+                    // Android Mode
+                    if (typeof Android !== 'undefined') {
+                        currentDuration = Android.getDuration();
+                        currentPosition = Android.getCurrentPosition();
                     } else {
-                        playNextSong();
+                         // Fallback simulation (should not happen if logic is correct)
+                         if (currentPosition < currentDuration) {
+                             currentPosition += 1000;
+                         }
                     }
                 }
                 
