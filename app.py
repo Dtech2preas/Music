@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 import json
 import os
 import yt_dlp
@@ -989,6 +989,37 @@ def get_song_filename(song_name, artist):
     safe_name = "".join(c for c in f"{song_name} - {artist}" if c.isalnum() or c in (' ', '-', '_')).rstrip()
     return f"{safe_name}.opus"
 
+def get_audio_stream_url(song_name, artist):
+    """Get the direct audio stream URL from YouTube without downloading"""
+    search_query = f"{song_name} {artist}"
+    ydl_opts = {
+        'format': 'bestaudio[protocol^=http]', # Force HTTP/HTTPS (avoid HLS/DASH manifests)
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+        'forcejson': True,
+        'cookiefile': app.config['COOKIES_FILE'] if os.path.exists(app.config['COOKIES_FILE']) else None,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+
+    if not os.path.exists(app.config['COOKIES_FILE']):
+        ydl_opts.pop('cookiefile', None)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # First search for the video
+            search_results = ydl.extract_info(f"ytsearch1:{search_query}", download=False)
+            if not search_results or 'entries' not in search_results or not search_results['entries']:
+                return None
+
+            # Get the first result
+            video_info = search_results['entries'][0]
+            return video_info.get('url')
+
+    except Exception as e:
+        logger.error(f"Stream URL extraction failed: {str(e)}")
+        return None
+
 def find_song_file(song_name, artist):
     if download_manager:
         expected_filename = get_song_filename(song_name, artist)
@@ -1295,11 +1326,11 @@ def start_smart_shuffle():
                 # Add songs to library
                 add_genre_songs_to_library(genre_data)
 
-                # Auto-download songs
-                if download_manager:
-                    downloads_triggered = auto_download_genre_songs(genre_data, user_id)
-                    system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
-                    logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
+                # Auto-download songs - DISABLED for Smart Shuffle (Streaming First)
+                # if download_manager:
+                #     downloads_triggered = auto_download_genre_songs(genre_data, user_id)
+                #     system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
+                #     logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
             else:
                 logger.error(f"Smart Shuffle exploration failed: {result.get('error')}")
 
@@ -1313,6 +1344,38 @@ def start_smart_shuffle():
         'message': f'Smart Shuffle started for {artist}',
         'vibe': f"{artist} Mix"
     })
+
+# NEW: Streaming Endpoint
+@app.route('/stream')
+def stream_audio():
+    """Stream audio directly from YouTube via server proxy"""
+    song_name = request.args.get('song')
+    artist = request.args.get('artist')
+
+    if not song_name:
+        return jsonify({'error': 'Song name is required'}), 400
+
+    try:
+        # Get the direct stream URL from YouTube
+        stream_url = get_audio_stream_url(song_name, artist or "")
+
+        if not stream_url:
+            return jsonify({'error': 'Could not resolve stream URL'}), 404
+
+        # Proxy the stream
+        # Note: We use stream_with_context to keep the connection open
+        req = requests.get(stream_url, stream=True)
+
+        def generate():
+            for chunk in req.iter_content(chunk_size=1024*32): # 32KB chunks
+                yield chunk
+
+        return Response(stream_with_context(generate()),
+                      content_type=req.headers.get('content-type', 'audio/mpeg'))
+
+    except Exception as e:
+        logger.error(f"Streaming error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Progressive search implementation
 @app.route('/search/progressive', methods=['POST'])
