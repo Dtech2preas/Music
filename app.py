@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 import json
 import os
 import yt_dlp
@@ -989,6 +989,68 @@ def get_song_filename(song_name, artist):
     safe_name = "".join(c for c in f"{song_name} - {artist}" if c.isalnum() or c in (' ', '-', '_')).rstrip()
     return f"{safe_name}.opus"
 
+def get_video_url_for_streaming(song_name, artist):
+    """Get a working YouTube Web URL for a song by checking multiple results"""
+    search_query = f"{song_name} {artist}"
+
+    # 1. Fast Search (Metadata only)
+    search_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'forcejson': True,
+        'cookiefile': app.config['COOKIES_FILE'] if os.path.exists(app.config['COOKIES_FILE']) else None,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+
+    # 2. Verification Options (Deep check)
+    verify_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False, # Actually check availability
+        'forcejson': True,
+        'cookiefile': app.config['COOKIES_FILE'] if os.path.exists(app.config['COOKIES_FILE']) else None,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+
+    if not os.path.exists(app.config['COOKIES_FILE']):
+        search_opts.pop('cookiefile', None)
+        verify_opts.pop('cookiefile', None)
+
+    try:
+        # Step 1: Get Candidates
+        with yt_dlp.YoutubeDL(search_opts) as ydl:
+            search_results = ydl.extract_info(f"ytsearch5:{search_query}", download=False)
+
+        if not search_results or 'entries' not in search_results:
+            return None
+
+        # Step 2: Verify Availability
+        with yt_dlp.YoutubeDL(verify_opts) as ydl:
+            for entry in search_results['entries']:
+                if not entry: continue
+
+                video_url = entry.get('url')
+                title = entry.get('title', 'Unknown')
+
+                if not video_url: continue
+
+                try:
+                    # Check if actually playable
+                    logger.info(f"Verifying candidate: {title} ({video_url})")
+                    ydl.extract_info(video_url, download=False)
+                    # If no exception, it's valid
+                    return video_url
+                except Exception as e:
+                    logger.warning(f"Candidate blocked/unavailable: {title} - {str(e)}")
+                    continue
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Video search failed: {str(e)}")
+        return None
+
 def find_song_file(song_name, artist):
     if download_manager:
         expected_filename = get_song_filename(song_name, artist)
@@ -1295,11 +1357,11 @@ def start_smart_shuffle():
                 # Add songs to library
                 add_genre_songs_to_library(genre_data)
 
-                # Auto-download songs
-                if download_manager:
-                    downloads_triggered = auto_download_genre_songs(genre_data, user_id)
-                    system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
-                    logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
+                # Auto-download songs - DISABLED for Smart Shuffle (Streaming First)
+                # if download_manager:
+                #     downloads_triggered = auto_download_genre_songs(genre_data, user_id)
+                #     system_monitor.increment_counter('total_auto_downloads', downloads_triggered)
+                #     logger.info(f"Smart Shuffle triggered {downloads_triggered} downloads for {query}")
             else:
                 logger.error(f"Smart Shuffle exploration failed: {result.get('error')}")
 
@@ -1313,6 +1375,81 @@ def start_smart_shuffle():
         'message': f'Smart Shuffle started for {artist}',
         'vibe': f"{artist} Mix"
     })
+
+# NEW: Streaming Endpoint
+@app.route('/stream')
+def stream_audio():
+    """Stream audio directly from YouTube via server proxy (piping yt-dlp stdout)"""
+    song_name = request.args.get('song')
+    artist = request.args.get('artist')
+
+    if not song_name:
+        return jsonify({'error': 'Song name is required'}), 400
+
+    try:
+        # 1. Find the video URL (Web URL)
+        video_url = get_video_url_for_streaming(song_name, artist or "")
+
+        if not video_url:
+            return jsonify({'error': 'Could not find video'}), 404
+
+        # 2. Pipe yt-dlp output to client
+        # This handles HLS/DASH/Formats automatically and outputs linear bytes
+
+        cmd = [
+            'yt-dlp',
+            '-f', 'bestaudio', # Let yt-dlp pick the absolute best audio
+            '-o', '-',         # Output to stdout
+            '--quiet',
+            '--no-warnings',
+            video_url
+        ]
+
+        # Add cookies if available
+        if os.path.exists(app.config['COOKIES_FILE']):
+            cmd.extend(['--cookies', app.config['COOKIES_FILE']])
+
+        logger.info(f"Streaming: {' '.join(cmd)}")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1024 * 32
+        )
+
+        def generate():
+            try:
+                # Read until process ends
+                while True:
+                    chunk = process.stdout.read(1024 * 32) # 32KB chunks
+                    if not chunk:
+                        break
+                    yield chunk
+
+                # Check for errors after stream ends
+                return_code = process.poll()
+                if return_code and return_code != 0:
+                    stderr = process.stderr.read().decode()
+                    logger.error(f"Stream process failed: {stderr}")
+
+            except Exception as e:
+                logger.error(f"Stream generation error: {str(e)}")
+                process.terminate()
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+
+        # We assume WebM/Opus or M4A/AAC.
+        # Since we don't know exactly what yt-dlp picks without probing,
+        # 'audio/mpeg' or 'application/octet-stream' is a safe bet for browsers to sniff.
+        # But 'audio/webm' is the most likely output of 'bestaudio'.
+        return Response(stream_with_context(generate()),
+                      content_type='audio/webm')
+
+    except Exception as e:
+        logger.error(f"Streaming error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Progressive search implementation
 @app.route('/search/progressive', methods=['POST'])
