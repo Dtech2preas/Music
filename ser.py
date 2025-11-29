@@ -144,14 +144,16 @@ class SpotifyScraper:
                     song_name_clean = "Unknown Song"
                     if song_elem:
                         song_text = await song_elem.text_content()
-                        song_name_clean = song_text.strip() if song_text else "Unknown Song"
+                        # Clean up "Lyrics match" artifacts
+                        song_name_clean = song_text.strip().replace("• Lyrics match", "").strip() if song_text else "Unknown Song"
 
                     # Artist - get the second [data-encore-id="text"] element
                     artist_elems = await row.query_selector_all('[data-encore-id="text"]')
                     artist_name = "Unknown Artist"
                     if len(artist_elems) >= 2:
                         artist_text = await artist_elems[1].text_content()
-                        artist_name = artist_text.strip() if artist_text else "Unknown Artist"
+                        # Clean up "Lyrics match" artifacts from artist field too, just in case
+                        artist_name = artist_text.strip().replace("• Lyrics match", "").strip() if artist_text else "Unknown Artist"
 
                     # Album name - try to get from album link
                     album_elem = await row.query_selector('a[href*="/album/"]')
