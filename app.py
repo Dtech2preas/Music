@@ -1313,10 +1313,13 @@ def start_smart_shuffle():
             # when searching for the artist name.
             logger.info(f"Starting Smart Shuffle for artist: {artist}")
 
-            # Using artist + " Mix" might get better results for a vibe,
-            # or just the artist name for their top tracks.
-            # Let's try appending " Mix" to capture the "vibe" as requested.
-            query = f"{artist} Mix"
+            # REVERTED LOGIC: Search for the artist name directly.
+            # Searching for "{artist} Mix" was causing "accurate songs" issues
+            # by finding playlists with generic or mixed content.
+            # Searching for "{artist}" will return:
+            # 1. Top Charts -> The artist's top songs (Priority 1)
+            # 2. Featured Artists -> Similar artists (Priority 2, "flexible vibe")
+            query = artist
 
             result = explore_genre_api(query)
 
@@ -1342,7 +1345,7 @@ def start_smart_shuffle():
     return jsonify({
         'success': True,
         'message': f'Smart Shuffle started for {artist}',
-        'vibe': f"{artist} Mix"
+        'vibe': artist
     })
 
 # NEW: Streaming Endpoint
