@@ -2362,7 +2362,7 @@
                         <div class="search-result-artist">${escapeHtml(result.artist)} • ${escapeHtml(result.album || 'Unknown Album')}</div>
                     </div>
                     <div class="search-result-actions">
-                        <button class="play-btn" onclick="playArtistSong(${index})" ${isDownloaded ? '' : 'disabled'}>
+                        <button class="play-btn" onclick="playArtistSong(${index})">
                             ▶
                         </button>
                         <button class="download-btn" onclick="downloadArtistSong(${index})" ${isDownloaded ? 'disabled' : ''}>
@@ -2841,7 +2841,7 @@
                         <div class="search-result-artist">${escapeHtml(result.artist)} • ${escapeHtml(result.album || 'Unknown Album')}</div>
                     </div>
                     <div class="search-result-actions">
-                        <button class="play-btn" onclick="playSearchResult(${index})" ${isDownloaded ? '' : 'disabled'}>
+                        <button class="play-btn" onclick="playSearchResult(${index})">
                             ▶
                         </button>
                         <button class="download-btn" onclick="downloadSearchResult(${index})" ${isDownloaded ? 'disabled' : ''}>
